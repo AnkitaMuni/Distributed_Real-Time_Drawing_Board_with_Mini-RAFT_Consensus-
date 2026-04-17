@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RaftBoard — Distributed Drawing</title>
+  <style>
+    /* ── Reset & Variables ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #0d0f14;
+      --surface:   #161923;
+      --border:    #252a36;
+      --accent:    #6c63ff;
+      --accent2:   #ff6584;
+      --success:   #43e97b;
+      --warn:      #f9ca24;
+      --text:      #e8eaf0;
+      --muted:     #6b7280;
+      --radius:    10px;
+      --font-head: 'Space Grotesk', sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-head);
+      overflow: hidden;
+    }
+
+    .app {
+      display: grid;
+      grid-template-rows: 52px 1fr 44px;
+      height: 100vh;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      gap: 16px;
+      z-index: 10;
+    }
+
+    .logo { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; }
+    .logo span { color: var(--accent); }
+
+    .toolbar { display: flex; align-items: center; gap: 10px; flex: 1; }
+
+    .color-swatch {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      border: 2px solid transparent;
+      cursor: pointer;
+      transition: transform 0.15s, border-color 0.15s;
+    }
+    .color-swatch.active { transform: scale(1.2); border-color: #fff; }
+
+    .color-swatch.disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
+    .size-btn {
+      background: var(--border);
+      border: none;
+      border-radius: 6px;
+      color: var(--text);
+      padding: 4px 10px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .size-btn.active { background: var(--accent); }
+    .size-btn.disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
+    .sep { width: 1px; height: 24px; background: var(--border); }
+
+    .clear-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      padding: 5px 12px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .clear-btn.disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
+    .cluster-panel { display: flex; align-items: center; gap: 8px; }
+
+    .node-badge {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--border);
+      border-radius: 20px;
+      padding: 3px 10px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+    }
+    .node-badge.leader { background: rgba(108,99,255,0.25); border: 1px solid var(--accent); }
+
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+    .dot.leader   { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    .dot.follower { background: var(--success); }
+    .dot.unreachable { background: var(--accent2); }
+
+    .canvas-wrap {
+      position: relative;
+      overflow: hidden;
+      cursor: crosshair;
+    }
+    .canvas-wrap.readonly {
+      cursor: not-allowed;
+    }
+    .canvas-wrap.readonly::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        -45deg,
+        transparent,
+        transparent 18px,
+        rgba(255,101,132,0.04) 18px,
+        rgba(255,101,132,0.04) 20px
+      );
+      z-index: 5;
+    }
+
+    #readonly-badge {
+      display: none;
+      position: absolute;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255,101,132,0.18);
+      border: 1px solid var(--accent2);
+      color: var(--accent2);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      padding: 4px 14px;
+      border-radius: 20px;
+      letter-spacing: 0.06em;
+      z-index: 10;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    #readonly-badge.visible { display: block; }
+
+    canvas { display: block; width: 100%; height: 100%; }
+
+    footer {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 20px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      font-family: var(--font-mono);
+      color: var(--muted);
+    }
+
+    #ws-status { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); }
+    #ws-status.connected { background: var(--success); }
+
+    #toast {
+      position: fixed;
+      bottom: 60px; right: 20px;
+      background: var(--surface);
+      border: 1px solid var(--accent2);
+      color: var(--text);
+      padding: 10px 18px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      opacity: 0;
+      transition: opacity 0.3s;
+      z-index: 100;
+      max-width: 320px;
+    }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+
+<div class="app">
+  <header>
+    <div class="logo">Raft<span>Board</span></div>
+    <div class="toolbar">
+      <div class="color-swatch active" style="background:#e8eaf0" data-color="#e8eaf0"></div>
+      <div class="color-swatch" style="background:#6c63ff" data-color="#6c63ff"></div>
+      <div class="color-swatch" style="background:#43e97b" data-color="#43e97b"></div>
+      <div class="color-swatch" style="background:#ff6584" data-color="#ff6584"></div>
+      <div class="sep"></div>
+      <button class="size-btn active" data-size="3">S</button>
+      <button class="size-btn" data-size="7">M</button>
+      <div class="sep"></div>
+      <button class="clear-btn" id="clearBtn">Clear</button>
+    </div>
+
+    <div class="cluster-panel">
+      <div class="node-badge" id="badge-replica1"><div class="dot" id="dot-replica1"></div>r1</div>
+      <div class="node-badge" id="badge-replica2"><div class="dot" id="dot-replica2"></div>r2</div>
+      <div class="node-badge" id="badge-replica3"><div class="dot" id="dot-replica3"></div>r3</div>
+    </div>
+  </header>
+
+  <div class="canvas-wrap" id="canvasWrap">
+    <div id="readonly-badge">🔒 READ-ONLY — Follower View</div>
+    <canvas id="board"></canvas>
+  </div>
+
+  <footer>
+    <div id="ws-status"></div> <span id="ws-label">Connecting…</span>
+    <div style="margin-left:auto">Leader: <span id="leader-label" style="color:var(--accent)">—</span></div>
+    <div>POV: <span id="pov-label" style="color:var(--success)">—</span></div>
+  </footer>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── CONFIGURATION ─────────────────────────────────────────────────────────────
+const portToReplica = { "8081": "replica1", "8082": "replica2", "8083": "replica3" };
+const MY_REPLICA_ID = portToReplica[window.location.port] || "unknown";
+let currentLeaderID = null;
+
+document.getElementById("pov-label").textContent = MY_REPLICA_ID;
+
+// ── CANVAS SETUP ──────────────────────────────────────────────────────────────
+const wrap   = document.getElementById("canvasWrap");
+const canvas = document.getElementById("board");
+const ctx    = canvas.getContext("2d");
+
+function resize() {
+  canvas.width  = wrap.clientWidth;
+  canvas.height = wrap.clientHeight;
+}
+resize();
+window.addEventListener("resize", resize);
+
+// ── ROLE HELPERS ──────────────────────────────────────────────────────────────
+function isLeader() {
+  return currentLeaderID !== null && MY_REPLICA_ID === currentLeaderID;
+}
+
+function applyRoleUI() {
+  const leader = isLeader();
+  wrap.classList.toggle("readonly", !leader);
+  document.getElementById("readonly-badge").classList.toggle("visible", !leader);
+  document.querySelectorAll(".color-swatch, .size-btn").forEach(el => {
+    el.classList.toggle("disabled", !leader);
+  });
+  document.getElementById("clearBtn").classList.toggle("disabled", !leader);
+
+  // Update badge highlight
+  document.querySelectorAll(".node-badge").forEach(el => el.classList.remove("leader"));
+  const myBadge = document.getElementById(`badge-${MY_REPLICA_ID}`);
+  if (myBadge) myBadge.classList.toggle("leader", leader);
+}
+
+// ── DRAWING ──────────────────────────────────────────────────────────────────
+let isDrawing = false;
+let currentPath = [];
+let strokeColor = "#e8eaf0";
+let strokeSize  = 3;
+
+function getPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+}
+
+canvas.addEventListener("mousedown", (e) => {
+  if (!isLeader()) return;
+  isDrawing = true;
+  currentPath = [getPos(e)];
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!isDrawing || !isLeader()) return;
+  currentPath.push(getPos(e));
+  drawPath(currentPath, strokeColor, strokeSize);
+});
+
+canvas.addEventListener("mouseup", () => {
+  if (!isDrawing || !isLeader()) { isDrawing = false; return; }
+  isDrawing = false;
+  if (currentPath.length >= 2) sendStroke({ points: currentPath, color: strokeColor, size: strokeSize });
+});
+
+function drawPath(points, color, size) {
+  if (points.length < 2) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = size;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(points[0].x * canvas.width, points[0].y * canvas.height);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x * canvas.width, points[i].y * canvas.height);
+  }
+  ctx.stroke();
+}
+
+// ── WEBSOCKET & CLUSTER ───────────────────────────────────────────────────────
+let ws;
+function connect() {
+  // FIX: Use hostname to work across Docker containers
+  ws = new WebSocket(`ws://${window.location.hostname}:3000`);
+  ws.onopen = () => {
+    document.getElementById("ws-status").classList.add("connected");
+    document.getElementById("ws-label").textContent = "Connected to Gateway";
+  };
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if (msg.type === "stroke") drawPath(msg.stroke.points, msg.stroke.color, msg.stroke.size);
+  };
+  ws.onclose = () => {
+    document.getElementById("ws-status").classList.remove("connected");
+    setTimeout(connect, 2000);
+  };
+}
+
+function normaliseReplicaId(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim().toLowerCase();
+  const m = s.match(/(\d+)$/);
+  return m ? `replica${m[1]}` : s;
+}
+
+async function pollCluster() {
+  try {
+    // FIX: Use hostname for fetch
+    const res = await fetch(`http://${window.location.hostname}:3000/cluster`);
+    if (!res.ok) return;
+    const nodes = await res.json();
+
+    let newLeaderID = null;
+    nodes.forEach(node => {
+      const id = normaliseReplicaId(node.replicaId || node.id || node.url);
+      const state = (node.state || node.status || "").toLowerCase();
+      
+      const dot = document.getElementById(`dot-${id}`);
+      if (dot) dot.className = `dot ${state}`;
+
+      if (state === "leader") newLeaderID = id;
+    });
+
+    if (newLeaderID !== currentLeaderID) {
+      currentLeaderID = newLeaderID;
+      document.getElementById("leader-label").textContent = currentLeaderID ?? "—";
+      applyRoleUI();
+    }
+  } catch (e) {
+    console.error("Cluster poll failed", e);
+  }
+}
+
+function sendStroke(stroke) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "stroke", stroke }));
+  }
+}
+
+function showToast(m) {
+  const t = document.getElementById("toast");
+  t.textContent = m;
+  t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+applyRoleUI();
+connect();
+pollCluster();
+setInterval(pollCluster, 1000);
+</script>
+</body>
+</html>
